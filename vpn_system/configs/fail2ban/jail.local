@@ -12,6 +12,8 @@ backend = %(sshd_backend)s
 
 [nginx-http-auth]
 enabled = true
+backend = polling
+logpath = /var/log/nginx/error.log
 
 # Xray runs behind Nginx and typically logs only 127.0.0.1.
 # Use Nginx access log to ban abusive clients hitting invalid endpoints (4xx/5xx).
@@ -19,6 +21,7 @@ enabled = true
 enabled = true
 port    = http,https
 filter  = nginx-vortex-xray
+backend = polling
 logpath = /var/log/nginx/access.log
 maxretry = 20
 findtime = 300

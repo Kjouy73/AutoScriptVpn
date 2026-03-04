@@ -143,8 +143,8 @@ deploy_files() {
             fi
         fi
 
-        systemctl restart fail2ban || true
-    fi
+        if ! systemctl restart fail2ban; then
+ fi
 
     # Cleanup Default Nginx Configs
     log_info "Cleaning up default Nginx configurations..."
