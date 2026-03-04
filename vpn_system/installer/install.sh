@@ -268,7 +268,9 @@ main() {
                 fi
             fi
 
-            systemctl restart fail2ban || true
+            if ! systemctl restart fail2ban; then
+                log_warn "Fail2ban failed to restart. Check: journalctl -u fail2ban -n 120 --no-pager"
+            fi
         fi
 
         if [ -f "$VORTEX_LIB/scripts/repair_xray_config.py" ]; then
