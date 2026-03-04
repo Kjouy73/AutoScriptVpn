@@ -75,6 +75,21 @@ def harden_xray_service():
     if subprocess.run(["id", "-u", "vortex-x"], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode != 0:
         subprocess.run(["useradd", "-r", "-s", "/usr/sbin/nologin", "vortex-x"], check=False)
 
+    # Ensure Vortex-x ETC is writable by service user (required for db lock file)
+    vortex_etc = "/usr/local/etc/vortex-x"
+    db_path = os.path.join(vortex_etc, "db.json")
+    db_lock_path = f"{db_path}.lock"
+    os.makedirs(vortex_etc, exist_ok=True)
+    subprocess.run(["chown", "-R", "vortex-x:vortex-x", vortex_etc], check=False)
+    subprocess.run(["chmod", "750", vortex_etc], check=False)
+    if os.path.exists(db_path):
+        subprocess.run(["chown", "vortex-x:vortex-x", db_path], check=False)
+        subprocess.run(["chmod", "600", db_path], check=False)
+    if not os.path.exists(db_lock_path):
+        with open(db_lock_path, 'a'): os.utime(db_lock_path, None)
+    subprocess.run(["chown", "vortex-x:vortex-x", db_lock_path], check=False)
+    subprocess.run(["chmod", "600", db_lock_path], check=False)
+
     # Permissions
     dirs = [XRAY_CONF_DIR, XRAY_LOG_DIR]
     for d in dirs:

@@ -35,7 +35,8 @@ class VortexDB:
         lock_dir = os.path.dirname(self.lock_path)
         if lock_dir:
             os.makedirs(lock_dir, exist_ok=True)
-        with open(self.lock_path, "w") as lock:
+        # Use append mode to avoid truncating the lock file.
+        with open(self.lock_path, "a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
                 yield

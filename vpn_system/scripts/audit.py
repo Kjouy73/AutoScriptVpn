@@ -13,7 +13,9 @@ class SystemAuditor:
     def check_permissions(self):
         checks = [
             ("/usr/local/etc/vortex-x/db.json", 0o600, "Database"),
+            ("/usr/local/etc/vortex-x/db.json.lock", 0o600, "Database Lock"),
             ("/usr/local/etc/xray/config.json", 0o644, "Xray Config"),
+            ("/var/log/xray/error.log", 0o640, "Xray Error Log"),
             ("/etc/letsencrypt/live", 0o755, "SSL Certificates")
         ]
         
