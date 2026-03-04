@@ -1,0 +1,307 @@
+#!/bin/bash
+
+# ==================================================
+# Project: Vortex-x VPN Platform
+# Author: F4txhr
+# Description: Professional VPN Installer & Hardening
+# ==================================================
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Paths
+VORTEX_LIB="/usr/local/lib/vortex-x"
+VORTEX_ETC="/usr/local/etc/vortex-x"
+VORTEX_BIN="/usr/local/bin/vortex-x"
+
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+# --- Check Environment ---
+check_env() {
+    log_info "Checking environment..."
+    if [ -d "/data/data/com.termux" ] || [ -n "$PROOT_TMPDIR" ]; then
+        log_warn "Running in PRoot/Termux environment. Full system hardening and kernel protocols (WG/OVPN) might fail execution."
+        IS_PROOT=true
+    else
+        IS_PROOT=false
+        [ "$(id -u)" -ne 0 ] && log_error "This script must be run as root on a real VPS."
+    fi
+}
+
+# --- Detect OS ---
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        VER=$VERSION_ID
+    else
+        log_error "Unsupported OS."
+    fi
+    log_info "Detected OS: $NAME ($VER)"
+}
+
+# --- Install Dependencies ---
+install_deps() {
+    log_info "Installing dependencies..."
+    case "$OS" in
+        ubuntu|debian)
+            apt-get update -y
+            apt-get install -y \
+                python3 python3-pip python3-venv python3-psutil python3-yaml \
+                nginx certbot curl wget rsync socat cron jq vnstat fail2ban ufw \
+                wireguard wireguard-tools openvpn easy-rsa
+            ;;
+        centos|almalinux|rocky|alinux)
+            PKG_MGR="dnf"
+            command -v dnf >/dev/null 2>&1 || PKG_MGR="yum"
+
+            # Core packages
+            $PKG_MGR install -y python3 python3-pip nginx curl wget rsync socat cronie jq firewalld
+
+            # Enable EPEL if possible (needed for fail2ban/vnstat on many RHEL-family distros)
+            if ! $PKG_MGR install -y epel-release; then
+                log_warn "epel-release not available in base repos. Trying upstream EPEL RPM..."
+                if command -v rpm >/dev/null 2>&1; then
+                    RHEL_VER=$(rpm -E %rhel 2>/dev/null || true)
+                    if [ -n "$RHEL_VER" ]; then
+                        $PKG_MGR install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${RHEL_VER}.noarch.rpm" || true
+                    fi
+                fi
+            fi
+
+            # Try enabling EPEL (some images ship epel-release but keep repo disabled)
+            $PKG_MGR install -y dnf-plugins-core >/dev/null 2>&1 || true
+            if command -v dnf >/dev/null 2>&1; then
+                dnf config-manager --set-enabled epel >/dev/null 2>&1 || true
+                dnf config-manager --set-enabled epel-modular >/dev/null 2>&1 || true
+            elif command -v yum-config-manager >/dev/null 2>&1; then
+                yum-config-manager --enable epel >/dev/null 2>&1 || true
+            fi
+
+            $PKG_MGR makecache --refresh >/dev/null 2>&1 || $PKG_MGR makecache >/dev/null 2>&1 || true
+
+            # Python libraries
+            $PKG_MGR install -y python3-psutil python3-pyyaml || log_warn "python3-psutil/python3-pyyaml not found. Will try pip."
+            python3 -c "import psutil, yaml" >/dev/null 2>&1 || pip3 install psutil pyyaml
+
+            # Optional tools
+            $PKG_MGR install -y vnstat || log_warn "vnstat not found. Skipping."
+
+            # fail2ban availability differs between cloud repos. Try default, then force-enable EPEL.
+            if ! $PKG_MGR install -y fail2ban fail2ban-systemd; then
+                log_warn "fail2ban not found in default repos. Trying EPEL..."
+                $PKG_MGR --enablerepo=epel install -y fail2ban fail2ban-systemd || log_warn "fail2ban not available even in EPEL. Skipping."
+            fi
+            $PKG_MGR --enablerepo=epel install -y fail2ban-firewalld >/dev/null 2>&1 || true
+
+            # Try install certbot, fallback to pip if missing
+            if ! $PKG_MGR install -y certbot; then
+                pip3 install certbot
+            fi
+            ;;
+        *)
+            log_error "Distribution $OS not supported yet."
+            ;;
+    esac
+}
+
+# --- Deploy Files ---
+deploy_files() {
+    log_info "Deploying Vortex-x files..."
+    mkdir -p "$VORTEX_LIB" "$VORTEX_ETC"
+
+    # Sync project files
+    cp -r ./vpn_system/* "$VORTEX_LIB/"
+
+    # Register CLI
+    chmod 755 "$VORTEX_LIB/cli/vortex-x" || true
+    ln -sf "$VORTEX_LIB/cli/vortex-x" "$VORTEX_BIN"
+    chmod +x "$VORTEX_BIN"
+    ln -sf "$VORTEX_BIN" "/usr/bin/vortex-x"
+
+    # Deploy Configs (Fail2ban)
+    if [ -d "/etc/fail2ban" ]; then
+        log_info "Configuring Fail2ban..."
+        cp "$VORTEX_LIB/configs/fail2ban/jail.local" "/etc/fail2ban/jail.local"
+        if [ -d "$VORTEX_LIB/configs/fail2ban/filter.d" ]; then
+            cp -f "$VORTEX_LIB"/configs/fail2ban/filter.d/*.conf "/etc/fail2ban/filter.d/" 2>/dev/null || true
+        fi
+
+        # Prefer firewalld banaction when available
+        if command -v firewall-cmd &> /dev/null && [ -f "/etc/fail2ban/action.d/firewallcmd-ipset.conf" ]; then
+            if ! grep -q '^banaction[[:space:]]*=' /etc/fail2ban/jail.local; then
+                tmp="$(mktemp)"
+                awk 'BEGIN{added=0} {print} $0 ~ /^\[DEFAULT\]$/ && added==0 {print "banaction = firewallcmd-ipset"; print "banaction_allports = firewallcmd-ipset"; added=1}' \
+                    /etc/fail2ban/jail.local > "$tmp" && mv "$tmp" /etc/fail2ban/jail.local
+            fi
+        fi
+
+        if ! systemctl restart fail2ban; then
+            log_warn "Fail2ban failed to restart. Check: journalctl -u fail2ban -n 120 --no-pager"
+        fi
+    fi
+
+    # Cleanup Default Nginx Configs
+    log_info "Cleaning up default Nginx configurations..."
+    rm -f /etc/nginx/conf.d/default.conf
+    rm -f /etc/nginx/sites-enabled/default
+
+    # Do not overwrite distro nginx.conf. We only manage vhosts in conf.d.
+    mkdir -p /etc/nginx/conf.d
+}
+
+# --- Hardening ---
+apply_hardening() {
+    if [ "$IS_PROOT" = false ]; then
+        log_info "Applying system hardening..."
+        # Create non-root user for services
+        id -u vortex-x &>/dev/null || useradd -r -s /usr/sbin/nologin vortex-x
+        
+        # Directory permissions
+        chown -R vortex-x:vortex-x "$VORTEX_ETC"
+        chmod 750 "$VORTEX_ETC"
+        if [ -f "$VORTEX_ETC/db.json" ]; then
+            chmod 600 "$VORTEX_ETC/db.json"
+        fi
+        
+        # Firewall setup (Detect UFW or Firewalld)
+        if command -v ufw &> /dev/null; then
+            log_info "Configuring UFW..."
+            ufw allow 80/tcp
+            ufw allow 443/tcp
+            ufw allow ssh
+            ufw allow 51820/udp
+            ufw allow 1194/udp
+            ufw allow 1194/tcp
+            # ufw --force enable # Optional: auto-enable
+        elif command -v firewall-cmd &> /dev/null; then
+            log_info "Configuring Firewalld..."
+            systemctl start firewalld
+            systemctl enable firewalld
+            firewall-cmd --permanent --add-service=http
+            firewall-cmd --permanent --add-service=https
+            firewall-cmd --permanent --add-service=ssh
+            # Enable standard VPN ports
+            firewall-cmd --permanent --add-port=51820/udp
+            firewall-cmd --permanent --add-port=1194/udp
+            firewall-cmd --permanent --add-port=1194/tcp
+            # Enable Masquerade for VPN Tunneling
+            firewall-cmd --permanent --add-masquerade
+            firewall-cmd --reload
+        else
+            log_warn "No supported firewall manager found (ufw/firewalld). Ports might be closed."
+        fi
+        
+        # Run Service Hardening
+        python3 "$VORTEX_LIB/scripts/harden_services.py"
+        
+        # SELinux Context for Nginx Proxy (Critical for RHEL/Alinux)
+        if command -v getsebool &> /dev/null; then
+            log_info "Configuring SELinux for Nginx Proxy..."
+            setsebool -P httpd_can_network_connect 1 || true
+        fi
+
+        log_success "Hardening applied."
+    fi
+}
+
+# --- Setup Cron ---
+setup_cron() {
+    log_info "Setting up Cron Jobs for Monitoring..."
+    CRON_FILE="/etc/cron.d/vortex-x"
+    cat > "$CRON_FILE" <<EOF
+MAILTO=""
+* * * * * root python3 $VORTEX_LIB/monitoring/traffic_monitor.py
+* * * * * root python3 $VORTEX_LIB/user_management/ip_limiter.py
+*/5 * * * * root python3 $VORTEX_LIB/monitoring/health_check.py --quiet
+0 * * * * root python3 $VORTEX_LIB/user_management/expiry_manager.py
+0 0 * * * root python3 $VORTEX_LIB/scripts/ssl_manager.py renew
+EOF
+    chmod 644 "$CRON_FILE"
+    
+    # Try restarting cron services quietly
+    if systemctl restart crond &>/dev/null; then
+        log_success "Cron service (crond) restarted."
+    elif systemctl restart cron &>/dev/null; then
+        log_success "Cron service (cron) restarted."
+    elif systemctl restart cronie &>/dev/null; then
+         log_success "Cron service (cronie) restarted."
+    else
+        log_warn "Could not restart cron service automatically. Please check 'crond' status."
+    fi
+}
+
+main() {
+    if [ "$1" = "--sync-runtime" ]; then
+        log_info "Syncing runtime files only..."
+        mkdir -p "$VORTEX_LIB"
+        if command -v rsync &>/dev/null; then
+            rsync -a --delete ./vpn_system/ "$VORTEX_LIB/"
+        else
+            cp -r ./vpn_system/* "$VORTEX_LIB/"
+        fi
+
+        install -m 755 "$VORTEX_LIB/cli/vortex-x" "$VORTEX_BIN"
+        install -m 755 "$VORTEX_BIN" "/usr/bin/vortex-x"
+
+        # Refresh fail2ban definitions (if fail2ban exists on the host)
+        if [ -d "/etc/fail2ban" ] && [ -d "$VORTEX_LIB/configs/fail2ban" ]; then
+            log_info "Refreshing Fail2ban configs..."
+            cp "$VORTEX_LIB/configs/fail2ban/jail.local" "/etc/fail2ban/jail.local" || true
+            if [ -d "$VORTEX_LIB/configs/fail2ban/filter.d" ]; then
+                cp -f "$VORTEX_LIB"/configs/fail2ban/filter.d/*.conf "/etc/fail2ban/filter.d/" 2>/dev/null || true
+            fi
+
+            # Prefer firewalld banaction when available
+            if command -v firewall-cmd &> /dev/null && [ -f "/etc/fail2ban/action.d/firewallcmd-ipset.conf" ]; then
+                if ! grep -q '^banaction[[:space:]]*=' /etc/fail2ban/jail.local; then
+                    tmp="$(mktemp)"
+                    awk 'BEGIN{added=0} {print} $0 ~ /^\[DEFAULT\]$/ && added==0 {print "banaction = firewallcmd-ipset"; print "banaction_allports = firewallcmd-ipset"; added=1}' \
+                        /etc/fail2ban/jail.local > "$tmp" && mv "$tmp" /etc/fail2ban/jail.local
+                fi
+            fi
+
+            if ! systemctl restart fail2ban; then
+                log_warn "Fail2ban failed to restart. Check: journalctl -u fail2ban -n 120 --no-pager"
+            fi
+        fi
+
+        if [ -f "$VORTEX_LIB/scripts/repair_xray_config.py" ]; then
+            log_info "Running post-sync Xray repair..."
+            python3 "$VORTEX_LIB/scripts/repair_xray_config.py" || log_warn "Post-sync repair failed. Please check output above."
+        fi
+
+        log_success "Runtime sync complete."
+        exit 0
+    fi
+
+    check_env
+    detect_os
+    
+    if [ "$IS_PROOT" = false ]; then
+        install_deps
+        deploy_files
+        apply_hardening
+        setup_cron
+
+        # Start core services
+        systemctl enable --now nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
+        systemctl restart xray >/dev/null 2>&1 || true
+        systemctl enable --now fail2ban >/dev/null 2>&1 || true
+
+        log_success "Vortex-x installed successfully!"
+        log_info "Next: run 'vortex-x init -d <your-domain>'"
+    else
+        log_warn "Installer skipped system execution due to PRoot environment."
+        log_info "Source files are ready in ./vpn_system"
+    fi
+}
+
+main "$@"

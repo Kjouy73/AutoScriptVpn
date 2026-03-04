@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+import argparse
+import sys
+import os
+import time
+
+# Base path for Vortex-x library
+LIB_PATH = "/usr/local/lib/vortex-x"
+if not os.path.exists(LIB_PATH):
+    # Fallback to current directory for development
+    LIB_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+sys.path.append(LIB_PATH)
+
+from core.models import VortexDB
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Vortex-x VPN Platform CLI",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    
+    parser.add_argument("--version", action="store_true", help="Print CLI source path")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    
+    # Init command
+    init_p = subparsers.add_parser("init", help="Initialize system")
+    init_p.add_argument("-d", "--domain", required=True, help="Domain for SSL and VPN")
+
+    # Menu command
+    subparsers.add_parser("menu", help="Launch interactive menu")
+
+    # Runtime sync command
+    sync_p = subparsers.add_parser("sync", help="Sync local vpn_system source into runtime path")
+    sync_p.add_argument("--source", default="./vpn_system", help="Path to local vpn_system source directory")
+    sync_p.add_argument("--target", default="/usr/local/lib/vortex-x", help="Runtime target directory")
+
+    # Doctor command
+    doctor_p = subparsers.add_parser("doctor", help="Run health checks for services/config/permissions")
+    doctor_p.add_argument("--json", action="store_true", help="Print doctor report as JSON")
+
+    # Host command
+    host_p = subparsers.add_parser("host", help="Manage connect endpoints (alternate server addresses)")
+    host_sub = host_p.add_subparsers(dest="host_cmd")
+
+    host_add = host_sub.add_parser("add", help="Add an alternate connect endpoint")
+    host_add.add_argument("-a", "--address", required=True, help="Domain or IP that points to this server")
+
+    host_rm = host_sub.add_parser("remove", help="Remove an alternate connect endpoint")
+    host_rm.add_argument("-a", "--address", required=True)
+
+    host_sub.add_parser("list", help="List alternate connect endpoints")
+
+    # User command
+    user_p = subparsers.add_parser("user", help="Manage VPN users")
+    user_sub = user_p.add_subparsers(dest="user_cmd")
+    
+    add_u = user_sub.add_parser("add", help="Add new user")
+    add_u.add_argument("-u", "--username", required=True)
+    add_u.add_argument("-p", "--protocol", choices=["vless", "vmess", "trojan", "shadowsocks", "wireguard", "openvpn"], required=True)
+    add_u.add_argument("--connect-domain", help="Override connect domain/IP for generated links")
+    add_u.add_argument("--bug-address", help="Alias of --connect-domain (common VPN bug host usage)")
+    add_u.add_argument("--sni", help="Override TLS SNI (server_name)")
+    add_u.add_argument("--bug-sni", help="Alias of --sni for bug configuration workflows")
+    add_u.add_argument("--host", help="Override WS Host header")
+    add_u.add_argument("--bug-host", help="Alias of --host for bug configuration workflows")
+    add_u.add_argument("--port", type=int, help="Override port for generated links")
+    add_u.add_argument("--ntls-port", type=int, help="Override port for NTLS links (default 80)")
+    add_u.add_argument("--tls-insecure", action="store_true", help="Allow insecure TLS (skip verification)")
+    add_u.add_argument("--vless-path", help="Override VLESS WS path")
+    add_u.add_argument("--vmess-path", help="Override VMess WS path")
+    add_u.add_argument("--trojan-path", help="Override Trojan WS path")
+    add_u.add_argument("--ss-path", help="Override Shadowsocks WS path")
+    add_u.add_argument("--vless-grpc-service", help="Override VLESS gRPC service name")
+    add_u.add_argument("--ss-method", help="Override Shadowsocks method (default aes-256-gcm)")
+    add_u.add_argument("--ss-plugin-opts", help="Override Shadowsocks plugin opts string")
+    add_u.add_argument("--save-settings", action="store_true", help="Persist provided transport overrides as new defaults")
+    add_u.add_argument("--print-template", action="store_true", help="Print editable template links using BUG_HOST placeholder for connect address")
+    add_u.add_argument("--days", type=int, default=30, help="Account validity in days")
+    add_u.add_argument("--ip-limit", type=int, default=2, help="Max concurrent IPs")
+    add_u.add_argument("--quota-gb", type=int, default=0, help="Bandwidth quota in GB (0 = unlimited)")
+    add_u.add_argument("--trial-hours", type=int, default=0, help="Trial duration in hours (overrides days)")
+    
+    clash_p = user_sub.add_parser("clash", help="Export Clash Meta config")
+    clash_p.add_argument("-u", "--username", required=True)
+
+    # Backup command
+    backup_p = subparsers.add_parser("backup", help="Manage system backups")
+    backup_sub = backup_p.add_subparsers(dest="backup_cmd")
+    backup_sub.add_parser("create", help="Create a new backup")
+    restore_p = backup_sub.add_parser("restore", help="Restore from backup")
+    restore_p.add_argument("-f", "--file", required=True, help="Backup filename")
+
+    args = parser.parse_args()
+
+    if args.version:
+        print(f"vortex-x cli path: {os.path.abspath(__file__)}")
+        return
+
+    if args.command == "menu":
+        os.system(f"bash {LIB_PATH}/menu/menu.sh")
+    elif args.command == "sync":
+        import shutil
+        source = os.path.abspath(args.source)
+        target = os.path.abspath(args.target)
+        if not os.path.isdir(source):
+            print(f"[ERROR] Source directory not found: {source}")
+            return
+        os.makedirs(target, exist_ok=True)
+        shutil.copytree(source, target, dirs_exist_ok=True)
+        os.chmod(os.path.join(target, "cli", "vortex-x"), 0o755)
+        print(f"[OK] Synced runtime files: {source} -> {target}")
+        print(f"[INFO] Runtime CLI path: {os.path.join(target, 'cli', 'vortex-x')}")
+    elif args.command == "doctor":
+        import subprocess
+        cmd = [sys.executable, os.path.join(LIB_PATH, "monitoring", "health_check.py")]
+        if args.json:
+            cmd.append("--json")
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            sys.exit(result.returncode)
+    elif args.command == "init":
+        print(f"Initializing Vortex-x with domain: {args.domain}")
+        
+        from protocol_adapters.xray import XrayAdapter
+        from protocol_adapters.nginx import NginxAdapter
+        from scripts.ssl_manager import SSLManager
+        
+        # 1. Issue SSL Certificate First
+        ssl = SSLManager(args.domain)
+        if not ssl.issue_cert():
+            print("[ERROR] SSL Issuance failed. Please check your domain DNS and port 80.")
+            return
+
+        # 2. Setup Xray Base Config
+        xray = XrayAdapter()
+        xray.clear_inbounds()
+        xray.generate_vless_ws(10001)
+        xray.generate_vmess_ws(10002)
+        xray.generate_vless_grpc(10003, service_name="vortex-grpc")
+        xray.generate_trojan_ws(10004)
+        xray.generate_ss_ws(10005)
+        xray.save()
+        print("[OK] Xray configuration generated (WS + gRPC + Trojan + SS).")
+
+        # 3. Save domain to DB
+        db = VortexDB()
+        db.data["settings"]["domain"] = args.domain
+        db.save()
+
+        # 4. Setup Nginx Virtual Host (follow configurable paths/service names)
+        settings = db.data.get("settings", {})
+        nginx = NginxAdapter()
+        try:
+            nginx.generate_vhost(
+                args.domain,
+                10001,
+                10002,
+                10004,
+                10005,
+                vless_path=settings.get("vless_path", "/vortex-vless"),
+                vmess_path=settings.get("vmess_path", "/vortex-vmess"),
+                trojan_path=settings.get("trojan_path", "/vortex-trojan"),
+                ss_path=settings.get("ss_path", "/vortex-ss"),
+                grpc_service=settings.get("vless_grpc_service", "vortex-grpc")
+            )
+            print("[OK] Nginx virtual host configured with full protocol support.")
+        except Exception as e:
+            print(f"[WARN] Nginx configuration failed: {e}")
+
+        # 5. Restore users to config
+        from user_management.account_manager import AccountManager
+        manager = AccountManager()
+        manager.sync_all_users()
+
+        # 6. Optional legacy protocol bootstrap
+        if not os.environ.get("PROOT_TMPDIR"):
+            import shutil
+            import subprocess
+            if shutil.which("wg"):
+                from protocol_adapters.wireguard import WireguardAdapter
+                wg = WireguardAdapter()
+                wg.setup_server()
+                subprocess.run(["systemctl", "enable", "--now", "wg-quick@wg0"], check=False)
+            else:
+                print("[WARN] WireGuard tools not installed. Skipping WG bootstrap.")
+
+        print("[SUCCESS] Vortex-x system initialized.")
+    elif args.command == "backup":
+        from scripts.backup_manager import BackupManager
+        manager = BackupManager()
+        if args.backup_cmd == "create":
+            manager.create_backup()
+        elif args.backup_cmd == "restore":
+            manager.restore_backup(args.file)
+    elif args.command == "host":
+        db = VortexDB()
+        if args.host_cmd == "list":
+            hosts = db.list_hosts()
+            if not hosts:
+                print("(no alternate hosts configured)")
+            else:
+                for h in hosts:
+                    print(h)
+        elif args.host_cmd == "add":
+            try:
+                added = db.add_host(args.address)
+                if added:
+                    print(f"[OK] Added host: {args.address}")
+                else:
+                    print(f"[INFO] Host already exists: {args.address}")
+            except Exception as e:
+                print(f"[ERROR] {e}")
+        elif args.host_cmd == "remove":
+            removed = db.remove_host(args.address)
+            if removed:
+                print(f"[OK] Removed host: {args.address}")
+            else:
+                print(f"[INFO] Host not found: {args.address}")
+        else:
+            host_p.print_help()
+    elif args.command == "user":
+        if args.user_cmd == "clash":
+            from user_management.clash_generator import ClashGenerator
+            gen = ClashGenerator()
+            print(f"\n--- CLASH META CONFIG: {args.username} ---\n")
+            print(gen.generate_config(args.username))
+            print("------------------------------------------\n")
+        elif args.user_cmd == "add":
+            from user_management.account_manager import AccountManager
+            manager = AccountManager()
+            db = VortexDB()
+
+            def print_links_for_current_settings(prefix: str = ""):
+                if args.protocol == "vless":
+                    for label, link in manager.generate_vless_links(user).items():
+                        print(f"{prefix}{label:<8}: {link}")
+                elif args.protocol == "vmess":
+                    for label, link in manager.generate_vmess_links(user).items():
+                        print(f"{prefix}{label:<8}: {link}")
+                elif args.protocol == "trojan":
+                    for label, link in manager.generate_trojan_links(user).items():
+                        print(f"{prefix}{label:<8}: {link}")
+                elif args.protocol == "shadowsocks":
+                    for label, link in manager.generate_ss_links(user).items():
+                        print(f"{prefix}{label:<8}: {link}")
+
+            effective_connect_domain = args.connect_domain or args.bug_address
+            effective_sni = args.sni or args.bug_sni
+            effective_host = args.host or args.bug_host
+
+            settings_updates = {
+                "connect_domain": effective_connect_domain,
+                "sni": effective_sni,
+                "host": effective_host,
+                "port": args.port,
+                "ntls_port": args.ntls_port,
+                "tls_insecure": args.tls_insecure if args.tls_insecure else None,
+                "vless_path": args.vless_path,
+                "vmess_path": args.vmess_path,
+                "trojan_path": args.trojan_path,
+                "ss_path": args.ss_path,
+                "vless_grpc_service": args.vless_grpc_service,
+                "ss_method": args.ss_method,
+                "ss_plugin_opts": args.ss_plugin_opts
+            }
+
+            # If endpoint/address is overridden (e.g. to IP) but host/SNI are not,
+            # keep TLS/WS headers pinned to the configured domain for compatibility.
+            if effective_connect_domain and effective_sni is None:
+                settings_updates["sni"] = db.data.get("settings", {}).get("domain")
+            if effective_connect_domain and effective_host is None:
+                settings_updates["host"] = db.data.get("settings", {}).get("domain")
+            has_overrides = any(value is not None for value in settings_updates.values())
+            original_settings = dict(manager.db.data.get("settings", {}))
+
+            if has_overrides:
+                for key, value in settings_updates.items():
+                    if value is not None:
+                        manager.db.data["settings"][key] = value
+
+                if args.save_settings:
+                    db.data["settings"] = dict(manager.db.data.get("settings", {}))
+                    db.save()
+
+                    # Keep Nginx routes aligned with updated transport settings
+                    domain = db.data.get("settings", {}).get("domain")
+                    if domain:
+                        from protocol_adapters.nginx import NginxAdapter
+                        nginx = NginxAdapter()
+                        current = db.data.get("settings", {})
+                        try:
+                            nginx.generate_vhost(
+                                domain,
+                                10001,
+                                10002,
+                                10004,
+                                10005,
+                                vless_path=current.get("vless_path", "/vortex-vless"),
+                                vmess_path=current.get("vmess_path", "/vortex-vmess"),
+                                trojan_path=current.get("trojan_path", "/vortex-trojan"),
+                                ss_path=current.get("ss_path", "/vortex-ss"),
+                                grpc_service=current.get("vless_grpc_service", "vortex-grpc")
+                            )
+                        except Exception as e:
+                            print(f"[WARN] Failed to refresh Nginx routes after settings update: {e}")
+                else:
+                    print("[INFO] Using temporary transport overrides for this user/link only. Use --save-settings to persist.")
+            try:
+                user = manager.create_user(
+                    args.username,
+                    args.protocol,
+                    days=args.days,
+                    ip_limit=args.ip_limit,
+                    quota_gb=args.quota_gb,
+                    trial_hours=args.trial_hours
+                )
+                print(f"\n[SUCCESS] User {args.username} created!")
+                print(f"Protocol : {args.protocol}")
+                print(f"UUID     : {user['uuid']}")
+                print(f"Expires  : {time.ctime(user['expires_at'])}")
+                
+                print("\n--- CONNECTION LINK ---")
+                if args.protocol == "wireguard":
+                    print(manager.generate_wg_config(user))
+                else:
+                    print_links_for_current_settings()
+                print("-----------------------\n")
+
+                alt_hosts = manager.db.data.get("hosts", [])
+                if isinstance(alt_hosts, list) and alt_hosts and args.protocol in {"vless", "vmess", "trojan", "shadowsocks"}:
+                    domain = manager.db.data.get("settings", {}).get("domain")
+                    print("--- ALTERNATE ENDPOINTS ---")
+                    for h in alt_hosts:
+                        h = (h or "").strip()
+                        if not h:
+                            continue
+                        tmp_original = dict(manager.db.data.get("settings", {}))
+                        manager.db.data["settings"]["connect_domain"] = h
+                        if not manager.db.data["settings"].get("sni"):
+                            manager.db.data["settings"]["sni"] = domain
+                        if not manager.db.data["settings"].get("host"):
+                            manager.db.data["settings"]["host"] = domain
+                        print(f"[{h}]")
+                        print_links_for_current_settings(prefix="  ")
+                        manager.db.data["settings"] = tmp_original
+                    print("--------------------------\n")
+
+                if args.print_template and args.protocol in {"vless", "vmess", "trojan", "shadowsocks"}:
+                    domain = manager.db.data.get("settings", {}).get("domain")
+                    tmp_original = dict(manager.db.data.get("settings", {}))
+                    manager.db.data["settings"]["connect_domain"] = "BUG_HOST"
+                    if not manager.db.data["settings"].get("sni"):
+                        manager.db.data["settings"]["sni"] = domain
+                    if not manager.db.data["settings"].get("host"):
+                        manager.db.data["settings"]["host"] = domain
+                    print("--- TEMPLATE (EDIT ADDRESS ONLY) ---")
+                    print("Replace BUG_HOST with a domain/IP that points to this server.")
+                    print_links_for_current_settings()
+                    print("----------------------------------\n")
+                    manager.db.data["settings"] = tmp_original
+            except Exception as e:
+                print(f"[ERROR] {e}")
+            finally:
+                if has_overrides and not args.save_settings:
+                    manager.db.data["settings"] = original_settings
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
