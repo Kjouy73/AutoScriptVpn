@@ -62,7 +62,7 @@ install_deps() {
             dnf install -y epel-release
             dnf makecache
             # Try installing core packages. split ufw/firewalld logic
-            dnf install -y python3 python3-pip nginx wget rsync socat cronie jq firewalld
+            dnf install -y python3 python3-pip nginx curl wget rsync socat cronie jq firewalld
 
             # Python libraries
             dnf install -y python3-psutil python3-pyyaml || log_warn "Optional python packages (psutil/pyyaml) not found. Will try pip."
@@ -234,8 +234,14 @@ main() {
         deploy_files
         apply_hardening
         setup_cron
+
+        # Start core services
+        systemctl enable --now nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
+        systemctl restart xray >/dev/null 2>&1 || true
+        systemctl enable --now fail2ban >/dev/null 2>&1 || true
+
         log_success "Vortex-x installed successfully!"
-        log_info "Type 'vortex-x' to start."
+        log_info "Next: run 'vortex-x init -d <your-domain>'"
     else
         log_warn "Installer skipped system execution due to PRoot environment."
         log_info "Source files are ready in ./vpn_system"
