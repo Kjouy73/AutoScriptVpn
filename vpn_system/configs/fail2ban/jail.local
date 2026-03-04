@@ -26,4 +26,3 @@ port    = 80,443,10000:20000
 filter  = xray
 logpath = /var/log/xray/error.log
 maxretry = 5
-action  = iptables-allports[name=xray]

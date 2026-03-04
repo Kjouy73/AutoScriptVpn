@@ -59,20 +59,28 @@ install_deps() {
                 wireguard wireguard-tools openvpn easy-rsa
             ;;
         centos|almalinux|rocky|alinux)
-            dnf install -y epel-release
-            dnf makecache
-            # Try installing core packages. split ufw/firewalld logic
+            # Core packages
             dnf install -y python3 python3-pip nginx curl wget rsync socat cronie jq firewalld
 
+            # Enable EPEL if possible (needed for fail2ban/vnstat on many RHEL-family distros)
+            if ! dnf install -y epel-release; then
+                log_warn "epel-release not available in base repos. Trying upstream EPEL RPM..."
+                if command -v rpm >/dev/null 2>&1; then
+                    RHEL_VER=$(rpm -E %rhel 2>/dev/null || true)
+                    if [ -n "$RHEL_VER" ]; then
+                        dnf install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${RHEL_VER}.noarch.rpm" || true
+                    fi
+                fi
+            fi
+            dnf makecache || true
+
             # Python libraries
-            dnf install -y python3-psutil python3-pyyaml || log_warn "Optional python packages (psutil/pyyaml) not found. Will try pip."
+            dnf install -y python3-psutil python3-pyyaml || log_warn "python3-psutil/python3-pyyaml not found. Will try pip."
             python3 -c "import psutil, yaml" >/dev/null 2>&1 || pip3 install psutil pyyaml
 
-            # VPN tools
-            dnf install -y wireguard-tools openvpn easy-rsa || log_warn "Optional VPN tools (wireguard/openvpn/easy-rsa) not found. Skipping."
-
-            # Optional packages (might be missing on some cloud repos)
-            dnf install -y vnstat fail2ban || log_warn "Optional tools (vnstat/fail2ban) not found. Skipping."
+            # Optional tools
+            dnf install -y vnstat || log_warn "vnstat not found. Skipping."
+            dnf install -y fail2ban || log_warn "fail2ban not found in repos. Enable EPEL/CRB or install fail2ban via pip if you really need it."
 
             # Try install certbot, fallback to pip if missing
             if ! dnf install -y certbot; then
