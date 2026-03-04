@@ -136,7 +136,7 @@ deploy_files() {
 
         # Prefer firewalld banaction when available
         if command -v firewall-cmd &> /dev/null && [ -f "/etc/fail2ban/action.d/firewallcmd-ipset.conf" ]; then
-            if ! grep -q '^banaction\s*=' /etc/fail2ban/jail.local; then
+            if ! grep -q '^banaction[[:space:]]*=' /etc/fail2ban/jail.local; then
                 tmp="$(mktemp)"
                 awk 'BEGIN{added=0} {print} $0 ~ /^\[DEFAULT\]$/ && added==0 {print "banaction = firewallcmd-ipset"; print "banaction_allports = firewallcmd-ipset"; added=1}' \
                     /etc/fail2ban/jail.local > "$tmp" && mv "$tmp" /etc/fail2ban/jail.local
@@ -144,7 +144,9 @@ deploy_files() {
         fi
 
         if ! systemctl restart fail2ban; then
- fi
+            log_warn "Fail2ban failed to restart. Check: journalctl -u fail2ban -n 120 --no-pager"
+        fi
+    fi
 
     # Cleanup Default Nginx Configs
     log_info "Cleaning up default Nginx configurations..."
@@ -259,7 +261,7 @@ main() {
 
             # Prefer firewalld banaction when available
             if command -v firewall-cmd &> /dev/null && [ -f "/etc/fail2ban/action.d/firewallcmd-ipset.conf" ]; then
-                if ! grep -q '^banaction\s*=' /etc/fail2ban/jail.local; then
+                if ! grep -q '^banaction[[:space:]]*=' /etc/fail2ban/jail.local; then
                     tmp="$(mktemp)"
                     awk 'BEGIN{added=0} {print} $0 ~ /^\[DEFAULT\]$/ && added==0 {print "banaction = firewallcmd-ipset"; print "banaction_allports = firewallcmd-ipset"; added=1}' \
                         /etc/fail2ban/jail.local > "$tmp" && mv "$tmp" /etc/fail2ban/jail.local
