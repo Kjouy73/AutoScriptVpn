@@ -136,8 +136,10 @@ deploy_files() {
 
         # Prefer firewalld banaction when available
         if command -v firewall-cmd &> /dev/null && [ -f "/etc/fail2ban/action.d/firewallcmd-ipset.conf" ]; then
-            if ! grep -q '^banaction' /etc/fail2ban/jail.local; then
-                sed -i '/^\[DEFAULT\]/a banaction = firewallcmd-ipset\nbanaction_allports = firewallcmd-ipset' /etc/fail2ban/jail.local
+            if ! grep -q '^banaction\s*=' /etc/fail2ban/jail.local; then
+                tmp="$(mktemp)"
+                awk 'BEGIN{added=0} {print} $0 ~ /^\[DEFAULT\]$/ && added==0 {print "banaction = firewallcmd-ipset"; print "banaction_allports = firewallcmd-ipset"; added=1}' \
+                    /etc/fail2ban/jail.local > "$tmp" && mv "$tmp" /etc/fail2ban/jail.local
             fi
         fi
 
@@ -257,8 +259,10 @@ main() {
 
             # Prefer firewalld banaction when available
             if command -v firewall-cmd &> /dev/null && [ -f "/etc/fail2ban/action.d/firewallcmd-ipset.conf" ]; then
-                if ! grep -q '^banaction' /etc/fail2ban/jail.local; then
-                    sed -i '/^\[DEFAULT\]/a banaction = firewallcmd-ipset\nbanaction_allports = firewallcmd-ipset' /etc/fail2ban/jail.local
+                if ! grep -q '^banaction\s*=' /etc/fail2ban/jail.local; then
+                    tmp="$(mktemp)"
+                    awk 'BEGIN{added=0} {print} $0 ~ /^\[DEFAULT\]$/ && added==0 {print "banaction = firewallcmd-ipset"; print "banaction_allports = firewallcmd-ipset"; added=1}' \
+                        /etc/fail2ban/jail.local > "$tmp" && mv "$tmp" /etc/fail2ban/jail.local
                 fi
             fi
 
