@@ -53,18 +53,27 @@ install_deps() {
     case "$OS" in
         ubuntu|debian)
             apt-get update -y
-            apt-get install -y python3 python3-pip python3-venv python3-psutil \
-                nginx certbot curl wget rsync socat cron jq vnstat fail2ban ufw
+            apt-get install -y \
+                python3 python3-pip python3-venv python3-psutil python3-yaml \
+                nginx certbot curl wget rsync socat cron jq vnstat fail2ban ufw \
+                wireguard wireguard-tools openvpn easy-rsa
             ;;
         centos|almalinux|rocky|alinux)
             dnf install -y epel-release
             dnf makecache
             # Try installing core packages. split ufw/firewalld logic
             dnf install -y python3 python3-pip nginx wget rsync socat cronie jq firewalld
-            
+
+            # Python libraries
+            dnf install -y python3-psutil python3-pyyaml || log_warn "Optional python packages (psutil/pyyaml) not found. Will try pip."
+            python3 -c "import psutil, yaml" >/dev/null 2>&1 || pip3 install psutil pyyaml
+
+            # VPN tools
+            dnf install -y wireguard-tools openvpn easy-rsa || log_warn "Optional VPN tools (wireguard/openvpn/easy-rsa) not found. Skipping."
+
             # Optional packages (might be missing on some cloud repos)
             dnf install -y vnstat fail2ban || log_warn "Optional tools (vnstat/fail2ban) not found. Skipping."
-            
+
             # Try install certbot, fallback to pip if missing
             if ! dnf install -y certbot; then
                 pip3 install certbot
@@ -80,11 +89,12 @@ install_deps() {
 deploy_files() {
     log_info "Deploying Vortex-x files..."
     mkdir -p "$VORTEX_LIB" "$VORTEX_ETC"
-    
+
     # Sync project files
     cp -r ./vpn_system/* "$VORTEX_LIB/"
-    
+
     # Register CLI
+    chmod 755 "$VORTEX_LIB/cli/vortex-x" || true
     ln -sf "$VORTEX_LIB/cli/vortex-x" "$VORTEX_BIN"
     chmod +x "$VORTEX_BIN"
     ln -sf "$VORTEX_BIN" "/usr/bin/vortex-x"
@@ -101,42 +111,9 @@ deploy_files() {
     log_info "Cleaning up default Nginx configurations..."
     rm -f /etc/nginx/conf.d/default.conf
     rm -f /etc/nginx/sites-enabled/default
-    
-    # Ensure a clean, compatible nginx.conf
-    if [ -f "/etc/nginx/nginx.conf" ]; then
-        cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak
-    fi
-    
-    cat > /etc/nginx/nginx.conf <<EOF
-user nginx;
-worker_processes auto;
-error_log /var/log/nginx/error.log;
-pid /run/nginx.pid;
-include /usr/share/nginx/modules/*.conf;
 
-events {
-    worker_connections 1024;
-}
-
-http {
-    log_format  main  '\$remote_addr - \$remote_user [\$time_local] "\$request" '
-                      '\$status \$body_bytes_sent "\$http_referer" '
-                      '"\$http_user_agent" "\$http_x_forwarded_for"';
-
-    access_log  /var/log/nginx/access.log  main;
-
-    sendfile            on;
-    tcp_nopush          on;
-    tcp_nodelay         on;
-    keepalive_timeout   65;
-    types_hash_max_size 2048;
-
-    include             /etc/nginx/mime.types;
-    default_type        application/octet-stream;
-
-    include /etc/nginx/conf.d/*.conf;
-}
-EOF
+    # Do not overwrite distro nginx.conf. We only manage vhosts in conf.d.
+    mkdir -p /etc/nginx/conf.d
 }
 
 # --- Hardening ---
@@ -159,6 +136,9 @@ apply_hardening() {
             ufw allow 80/tcp
             ufw allow 443/tcp
             ufw allow ssh
+            ufw allow 51820/udp
+            ufw allow 1194/udp
+            ufw allow 1194/tcp
             # ufw --force enable # Optional: auto-enable
         elif command -v firewall-cmd &> /dev/null; then
             log_info "Configuring Firewalld..."
@@ -228,6 +208,14 @@ main() {
 
         install -m 755 "$VORTEX_LIB/cli/vortex-x" "$VORTEX_BIN"
         install -m 755 "$VORTEX_BIN" "/usr/bin/vortex-x"
+
+        # Refresh fail2ban definitions (if fail2ban exists on the host)
+        if [ -d "/etc/fail2ban" ] && [ -d "$VORTEX_LIB/configs/fail2ban" ]; then
+            log_info "Refreshing Fail2ban configs..."
+            cp "$VORTEX_LIB/configs/fail2ban/jail.local" "/etc/fail2ban/jail.local" || true
+            cp "$VORTEX_LIB/configs/fail2ban/filter.d/xray.conf" "/etc/fail2ban/filter.d/xray.conf" || true
+            systemctl restart fail2ban || true
+        fi
 
         if [ -f "$VORTEX_LIB/scripts/repair_xray_config.py" ]; then
             log_info "Running post-sync Xray repair..."

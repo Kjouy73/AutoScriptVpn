@@ -65,6 +65,12 @@ server {{
     listen [::]:80;
     server_name {domain};
 
+    # ACME challenge for certbot --webroot
+    location /.well-known/acme-challenge/ {{
+        root /var/www/html;
+        try_files $uri =404;
+    }}
+
     # NTLS WebSocket (no TLS termination)
     location {vless_path} {{
         if ($http_upgrade != "websocket") {{ return 404; }}

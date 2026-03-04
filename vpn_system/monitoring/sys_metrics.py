@@ -4,9 +4,13 @@ import psutil
 import socket
 import json
 import subprocess
+import sys
 from datetime import datetime, timedelta
 
-DB_PATH = "/usr/local/etc/vortex-x/db.json"
+# Add parent directory to path so we can import core
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.models import VortexDB
 
 def get_size(bytes, suffix="B"):
     factor = 1024
@@ -34,7 +38,7 @@ def get_ssl_days_left(domain):
     cert_path = f"/etc/letsencrypt/live/{domain}/fullchain.pem"
     if not os.path.exists(cert_path):
         return "No Cert"
-    
+
     try:
         cmd = f"openssl x509 -enddate -noout -in {cert_path}"
         res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
@@ -45,9 +49,9 @@ def get_ssl_days_left(domain):
             cert_date = datetime.strptime(date_str, "%b %d %H:%M:%S %Y %Z")
             days_left = (cert_date - datetime.now()).days
             return f"{days_left} days"
-    except Exception as e:
+    except Exception:
         return "Error"
-    
+
     return "Unknown"
 
 def get_metrics():
@@ -67,14 +71,14 @@ def get_metrics():
     except:
         cpu_usage = "N/A"
         ram_usage = "N/A"
-    
+
     # Disk
     try:
         disk = psutil.disk_usage('/')
         disk_usage = f"{disk.percent}%"
     except:
         disk_usage = "N/A"
-    
+
     # Network Traffic
     try:
         net_io = psutil.net_io_counters()
@@ -83,19 +87,11 @@ def get_metrics():
     except:
         rx = "N/A"
         tx = "N/A"
-    
+
     # App Specifics
-    domain = ""
-    total_users = 0
-    
-    if os.path.exists(DB_PATH):
-        try:
-            with open(DB_PATH, 'r') as f:
-                data = json.load(f)
-                domain = data.get("settings", {}).get("domain", "")
-                total_users = len(data.get("users", []))
-        except:
-            pass
+    db = VortexDB()
+    domain = db.data.get("settings", {}).get("domain", "")
+    total_users = len(db.data.get("users", []))
 
     ssl_info = get_ssl_days_left(domain) if domain else "No Domain"
 

@@ -2,7 +2,6 @@ import os
 import sys
 import subprocess
 import json
-import time
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,55 +16,77 @@ class TrafficMonitor:
     def get_xray_stats(self):
         """Fetches traffic stats from Xray API via xray stats command."""
         try:
-            # We use subprocess to call xray api tool
             cmd = ["xray", "api", "statsquery", "--server", self.xray_api, "--pattern", "user"]
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             if result.returncode == 0:
                 return json.loads(result.stdout)
-        except:
+        except Exception:
             return None
         return None
 
-    def get_wg_stats(self):
-        """Fetches WireGuard traffic and active peers."""
-        try:
-            result = subprocess.run(["wg", "show", "wg0", "transfer"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-            # Parse wg output
-            return result.stdout
-        except:
-            return None
+    def _parse_xray_user_counters(self, xray_data: dict) -> dict:
+        """
+        Returns: {email: {"uplink": int, "downlink": int}}
+        Xray counters are cumulative, so we store last seen counters per user and apply deltas.
+        """
+        counters = {}
+        if not xray_data or "stat" not in xray_data:
+            return counters
+
+        for stat in xray_data["stat"]:
+            name = stat.get("name", "")
+            value_raw = stat.get("value", 0)
+            try:
+                value = int(value_raw)
+            except Exception:
+                continue
+
+            parts = name.split(">>>")
+            # Expected: user>>>email>>>traffic>>>uplink|downlink
+            if len(parts) < 4 or parts[0] != "user":
+                continue
+
+            email = parts[1]
+            direction = parts[3]
+            if direction not in {"uplink", "downlink"}:
+                continue
+
+            entry = counters.setdefault(email, {"uplink": 0, "downlink": 0})
+            entry[direction] = value
+
+        return counters
 
     def sync_stats(self):
-        """Syncs all stats to the database and enforces limits."""
+        """Syncs cumulative counters from Xray into per-user used_bandwidth via delta accounting."""
         xray_data = self.get_xray_stats()
-        
-        # Update Xray Traffic in DB
-        if xray_data and "stat" in xray_data:
-            for stat in xray_data["stat"]:
-                name_parts = stat["name"].split(">>>")
-                if len(name_parts) >= 4:
-                    email = name_parts[1]
-                    value = int(stat["value"])
-                    
-                    for user in self.db.data["users"]:
-                        if user["username"] == email:
-                            # Update total used bandwidth
-                            user["used_bandwidth"] = user.get("used_bandwidth", 0) + value
-        
-        self.db.save()
+        counters = self._parse_xray_user_counters(xray_data)
 
-    def enforce_ip_limit(self):
-        """
-        Detects multiple IP logins and suspends users if they exceed limits.
-        This usually requires parsing Xray access logs.
-        """
-        LOG_FILE = "/var/log/vortex-x/access.log"
-        if not os.path.exists(LOG_FILE):
+        if not counters:
             return
 
-        # Simple logic: parse last 1000 lines of log for unique IPs per email
-        # In a real production system, this would be a more complex stateful tracker
-        pass
+        for user in self.db.data.get("users", []):
+            email = user.get("username")
+            if not email or email not in counters:
+                continue
+
+            current = counters[email]
+
+            if "xray_last" not in user:
+                user["xray_last"] = {"uplink": int(current.get("uplink", 0)), "downlink": int(current.get("downlink", 0))}
+                continue
+
+            last = user.get("xray_last") or {"uplink": 0, "downlink": 0}
+
+            delta_up = max(0, int(current.get("uplink", 0)) - int(last.get("uplink", 0)))
+            delta_down = max(0, int(current.get("downlink", 0)) - int(last.get("downlink", 0)))
+            delta_total = delta_up + delta_down
+
+            if delta_total:
+                user["used_bandwidth"] = int(user.get("used_bandwidth", 0)) + delta_total
+
+            user["xray_last"] = {"uplink": int(current.get("uplink", 0)), "downlink": int(current.get("downlink", 0))}
+
+        self.db.save()
 
 if __name__ == "__main__":
     monitor = TrafficMonitor()

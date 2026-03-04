@@ -94,7 +94,7 @@ def harden_xray_service():
         if not os.path.exists(log_p):
             with open(log_p, 'a'): os.utime(log_p, None)
         subprocess.run(["chown", "vortex-x:vortex-x", log_p], check=False)
-        subprocess.run(["chmod", "664", log_p], check=False)
+        subprocess.run(["chmod", "640", log_p], check=False)
         apply_selinux_context(log_p)
 
     # Binary Capabilities

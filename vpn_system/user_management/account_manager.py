@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import shutil
 from urllib.parse import quote, urlencode
 from core.models import VortexDB, UserAccount
 from protocol_adapters.xray import XrayAdapter
@@ -194,8 +195,16 @@ class AccountManager:
         
         # 3. Handle Legacy Protocols
         if protocol == "wireguard":
+            if not shutil.which("wg"):
+                raise ValueError("WireGuard tools not installed (wg).")
+
             from protocol_adapters.wireguard import WireguardAdapter
             wg = WireguardAdapter()
+            try:
+                wg.setup_server()
+            except PermissionError as exc:
+                raise PermissionError("WireGuard setup requires root privileges.") from exc
+
             client_priv, client_pub = wg.generate_keys()
             user_count = len([u for u in self.db.data["users"] if u["protocol"] == "wireguard"])
             client_ip = f"10.0.0.{user_count + 2}/32"
@@ -211,7 +220,7 @@ class AccountManager:
         elif protocol == "openvpn":
             try:
                 import subprocess
-                subprocess.run(["/usr/local/lib/vortex-x/scripts/openvpn_helper.sh", "add", username], check=False)
+                subprocess.run(["bash", "/usr/local/lib/vortex-x/scripts/openvpn_helper.sh", "add", username], check=False)
             except: pass
 
         # 4. Create User Object

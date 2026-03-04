@@ -160,6 +160,18 @@ def main():
         manager = AccountManager()
         manager.sync_all_users()
 
+        # 6. Optional legacy protocol bootstrap
+        if not os.environ.get("PROOT_TMPDIR"):
+            import shutil
+            import subprocess
+            if shutil.which("wg"):
+                from protocol_adapters.wireguard import WireguardAdapter
+                wg = WireguardAdapter()
+                wg.setup_server()
+                subprocess.run(["systemctl", "enable", "--now", "wg-quick@wg0"], check=False)
+            else:
+                print("[WARN] WireGuard tools not installed. Skipping WG bootstrap.")
+
         print("[SUCCESS] Vortex-x system initialized.")
     elif args.command == "backup":
         from scripts.backup_manager import BackupManager
