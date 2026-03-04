@@ -59,31 +59,50 @@ install_deps() {
                 wireguard wireguard-tools openvpn easy-rsa
             ;;
         centos|almalinux|rocky|alinux)
+            PKG_MGR="dnf"
+            command -v dnf >/dev/null 2>&1 || PKG_MGR="yum"
+
             # Core packages
-            dnf install -y python3 python3-pip nginx curl wget rsync socat cronie jq firewalld
+            $PKG_MGR install -y python3 python3-pip nginx curl wget rsync socat cronie jq firewalld
 
             # Enable EPEL if possible (needed for fail2ban/vnstat on many RHEL-family distros)
-            if ! dnf install -y epel-release; then
+            if ! $PKG_MGR install -y epel-release; then
                 log_warn "epel-release not available in base repos. Trying upstream EPEL RPM..."
                 if command -v rpm >/dev/null 2>&1; then
                     RHEL_VER=$(rpm -E %rhel 2>/dev/null || true)
                     if [ -n "$RHEL_VER" ]; then
-                        dnf install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${RHEL_VER}.noarch.rpm" || true
+                        $PKG_MGR install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${RHEL_VER}.noarch.rpm" || true
                     fi
                 fi
             fi
-            dnf makecache || true
+
+            # Try enabling EPEL (some images ship epel-release but keep repo disabled)
+            $PKG_MGR install -y dnf-plugins-core >/dev/null 2>&1 || true
+            if command -v dnf >/dev/null 2>&1; then
+                dnf config-manager --set-enabled epel >/dev/null 2>&1 || true
+                dnf config-manager --set-enabled epel-modular >/dev/null 2>&1 || true
+            elif command -v yum-config-manager >/dev/null 2>&1; then
+                yum-config-manager --enable epel >/dev/null 2>&1 || true
+            fi
+
+            $PKG_MGR makecache --refresh >/dev/null 2>&1 || $PKG_MGR makecache >/dev/null 2>&1 || true
 
             # Python libraries
-            dnf install -y python3-psutil python3-pyyaml || log_warn "python3-psutil/python3-pyyaml not found. Will try pip."
+            $PKG_MGR install -y python3-psutil python3-pyyaml || log_warn "python3-psutil/python3-pyyaml not found. Will try pip."
             python3 -c "import psutil, yaml" >/dev/null 2>&1 || pip3 install psutil pyyaml
 
             # Optional tools
-            dnf install -y vnstat || log_warn "vnstat not found. Skipping."
-            dnf install -y fail2ban || log_warn "fail2ban not found in repos. Enable EPEL/CRB or install fail2ban via pip if you really need it."
+            $PKG_MGR install -y vnstat || log_warn "vnstat not found. Skipping."
+
+            # fail2ban availability differs between cloud repos. Try default, then force-enable EPEL.
+            if ! $PKG_MGR install -y fail2ban fail2ban-systemd; then
+                log_warn "fail2ban not found in default repos. Trying EPEL..."
+                $PKG_MGR --enablerepo=epel install -y fail2ban fail2ban-systemd || log_warn "fail2ban not available even in EPEL. Skipping."
+            fi
+            $PKG_MGR --enablerepo=epel install -y fail2ban-firewalld >/dev/null 2>&1 || true
 
             # Try install certbot, fallback to pip if missing
-            if ! dnf install -y certbot; then
+            if ! $PKG_MGR install -y certbot; then
                 pip3 install certbot
             fi
             ;;
@@ -112,6 +131,14 @@ deploy_files() {
         log_info "Configuring Fail2ban..."
         cp "$VORTEX_LIB/configs/fail2ban/jail.local" "/etc/fail2ban/jail.local"
         cp "$VORTEX_LIB/configs/fail2ban/filter.d/xray.conf" "/etc/fail2ban/filter.d/xray.conf"
+
+        # Prefer firewalld banaction when available
+        if command -v firewall-cmd &> /dev/null && [ -f "/etc/fail2ban/action.d/firewallcmd-ipset.conf" ]; then
+            if ! grep -q '^banaction' /etc/fail2ban/jail.local; then
+                sed -i '/^\[DEFAULT\]/a banaction = firewallcmd-ipset\nbanaction_allports = firewallcmd-ipset' /etc/fail2ban/jail.local
+            fi
+        fi
+
         systemctl restart fail2ban || true
     fi
 
@@ -222,6 +249,14 @@ main() {
             log_info "Refreshing Fail2ban configs..."
             cp "$VORTEX_LIB/configs/fail2ban/jail.local" "/etc/fail2ban/jail.local" || true
             cp "$VORTEX_LIB/configs/fail2ban/filter.d/xray.conf" "/etc/fail2ban/filter.d/xray.conf" || true
+
+            # Prefer firewalld banaction when available
+            if command -v firewall-cmd &> /dev/null && [ -f "/etc/fail2ban/action.d/firewallcmd-ipset.conf" ]; then
+                if ! grep -q '^banaction' /etc/fail2ban/jail.local; then
+                    sed -i '/^\[DEFAULT\]/a banaction = firewallcmd-ipset\nbanaction_allports = firewallcmd-ipset' /etc/fail2ban/jail.local
+                fi
+            fi
+
             systemctl restart fail2ban || true
         fi
 
