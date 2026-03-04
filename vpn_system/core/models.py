@@ -69,3 +69,30 @@ class VortexDB:
             if u["username"] == username:
                 return u
         return None
+
+    def list_hosts(self) -> List[str]:
+        hosts = self.data.get("hosts")
+        if not isinstance(hosts, list):
+            hosts = []
+            self.data["hosts"] = hosts
+        return hosts
+
+    def add_host(self, address: str) -> bool:
+        address = (address or "").strip()
+        if not address:
+            raise ValueError("Host address cannot be empty")
+        hosts = self.list_hosts()
+        if address in hosts:
+            return False
+        hosts.append(address)
+        self.save()
+        return True
+
+    def remove_host(self, address: str) -> bool:
+        address = (address or "").strip()
+        hosts = self.list_hosts()
+        if address not in hosts:
+            return False
+        hosts.remove(address)
+        self.save()
+        return True

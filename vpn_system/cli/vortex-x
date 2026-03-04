@@ -39,6 +39,18 @@ def main():
     doctor_p = subparsers.add_parser("doctor", help="Run health checks for services/config/permissions")
     doctor_p.add_argument("--json", action="store_true", help="Print doctor report as JSON")
 
+    # Host command
+    host_p = subparsers.add_parser("host", help="Manage connect endpoints (alternate server addresses)")
+    host_sub = host_p.add_subparsers(dest="host_cmd")
+
+    host_add = host_sub.add_parser("add", help="Add an alternate connect endpoint")
+    host_add.add_argument("-a", "--address", required=True, help="Domain or IP that points to this server")
+
+    host_rm = host_sub.add_parser("remove", help="Remove an alternate connect endpoint")
+    host_rm.add_argument("-a", "--address", required=True)
+
+    host_sub.add_parser("list", help="List alternate connect endpoints")
+
     # User command
     user_p = subparsers.add_parser("user", help="Manage VPN users")
     user_sub = user_p.add_subparsers(dest="user_cmd")
@@ -63,6 +75,7 @@ def main():
     add_u.add_argument("--ss-method", help="Override Shadowsocks method (default aes-256-gcm)")
     add_u.add_argument("--ss-plugin-opts", help="Override Shadowsocks plugin opts string")
     add_u.add_argument("--save-settings", action="store_true", help="Persist provided transport overrides as new defaults")
+    add_u.add_argument("--print-template", action="store_true", help="Print editable template links using BUG_HOST placeholder for connect address")
     add_u.add_argument("--days", type=int, default=30, help="Account validity in days")
     add_u.add_argument("--ip-limit", type=int, default=2, help="Max concurrent IPs")
     add_u.add_argument("--quota-gb", type=int, default=0, help="Bandwidth quota in GB (0 = unlimited)")
@@ -180,6 +193,32 @@ def main():
             manager.create_backup()
         elif args.backup_cmd == "restore":
             manager.restore_backup(args.file)
+    elif args.command == "host":
+        db = VortexDB()
+        if args.host_cmd == "list":
+            hosts = db.list_hosts()
+            if not hosts:
+                print("(no alternate hosts configured)")
+            else:
+                for h in hosts:
+                    print(h)
+        elif args.host_cmd == "add":
+            try:
+                added = db.add_host(args.address)
+                if added:
+                    print(f"[OK] Added host: {args.address}")
+                else:
+                    print(f"[INFO] Host already exists: {args.address}")
+            except Exception as e:
+                print(f"[ERROR] {e}")
+        elif args.host_cmd == "remove":
+            removed = db.remove_host(args.address)
+            if removed:
+                print(f"[OK] Removed host: {args.address}")
+            else:
+                print(f"[INFO] Host not found: {args.address}")
+        else:
+            host_p.print_help()
     elif args.command == "user":
         if args.user_cmd == "clash":
             from user_management.clash_generator import ClashGenerator
@@ -191,6 +230,21 @@ def main():
             from user_management.account_manager import AccountManager
             manager = AccountManager()
             db = VortexDB()
+
+            def print_links_for_current_settings(prefix: str = ""):
+                if args.protocol == "vless":
+                    for label, link in manager.generate_vless_links(user).items():
+                        print(f"{prefix}{label:<8}: {link}")
+                elif args.protocol == "vmess":
+                    for label, link in manager.generate_vmess_links(user).items():
+                        print(f"{prefix}{label:<8}: {link}")
+                elif args.protocol == "trojan":
+                    for label, link in manager.generate_trojan_links(user).items():
+                        print(f"{prefix}{label:<8}: {link}")
+                elif args.protocol == "shadowsocks":
+                    for label, link in manager.generate_ss_links(user).items():
+                        print(f"{prefix}{label:<8}: {link}")
+
             effective_connect_domain = args.connect_domain or args.bug_address
             effective_sni = args.sni or args.bug_sni
             effective_host = args.host or args.bug_host
@@ -267,21 +321,44 @@ def main():
                 print(f"Expires  : {time.ctime(user['expires_at'])}")
                 
                 print("\n--- CONNECTION LINK ---")
-                if args.protocol == "vless":
-                    for label, link in manager.generate_vless_links(user).items():
-                        print(f"{label:<8}: {link}")
-                elif args.protocol == "vmess":
-                    for label, link in manager.generate_vmess_links(user).items():
-                        print(f"{label:<8}: {link}")
-                elif args.protocol == "trojan":
-                    for label, link in manager.generate_trojan_links(user).items():
-                        print(f"{label:<8}: {link}")
-                elif args.protocol == "shadowsocks":
-                    for label, link in manager.generate_ss_links(user).items():
-                        print(f"{label:<8}: {link}")
-                elif args.protocol == "wireguard":
+                if args.protocol == "wireguard":
                     print(manager.generate_wg_config(user))
+                else:
+                    print_links_for_current_settings()
                 print("-----------------------\n")
+
+                alt_hosts = manager.db.data.get("hosts", [])
+                if isinstance(alt_hosts, list) and alt_hosts and args.protocol in {"vless", "vmess", "trojan", "shadowsocks"}:
+                    domain = manager.db.data.get("settings", {}).get("domain")
+                    print("--- ALTERNATE ENDPOINTS ---")
+                    for h in alt_hosts:
+                        h = (h or "").strip()
+                        if not h:
+                            continue
+                        tmp_original = dict(manager.db.data.get("settings", {}))
+                        manager.db.data["settings"]["connect_domain"] = h
+                        if not manager.db.data["settings"].get("sni"):
+                            manager.db.data["settings"]["sni"] = domain
+                        if not manager.db.data["settings"].get("host"):
+                            manager.db.data["settings"]["host"] = domain
+                        print(f"[{h}]")
+                        print_links_for_current_settings(prefix="  ")
+                        manager.db.data["settings"] = tmp_original
+                    print("--------------------------\n")
+
+                if args.print_template and args.protocol in {"vless", "vmess", "trojan", "shadowsocks"}:
+                    domain = manager.db.data.get("settings", {}).get("domain")
+                    tmp_original = dict(manager.db.data.get("settings", {}))
+                    manager.db.data["settings"]["connect_domain"] = "BUG_HOST"
+                    if not manager.db.data["settings"].get("sni"):
+                        manager.db.data["settings"]["sni"] = domain
+                    if not manager.db.data["settings"].get("host"):
+                        manager.db.data["settings"]["host"] = domain
+                    print("--- TEMPLATE (EDIT ADDRESS ONLY) ---")
+                    print("Replace BUG_HOST with a domain/IP that points to this server.")
+                    print_links_for_current_settings()
+                    print("----------------------------------\n")
+                    manager.db.data["settings"] = tmp_original
             except Exception as e:
                 print(f"[ERROR] {e}")
             finally:
