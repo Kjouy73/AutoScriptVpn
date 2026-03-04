@@ -130,7 +130,9 @@ deploy_files() {
     if [ -d "/etc/fail2ban" ]; then
         log_info "Configuring Fail2ban..."
         cp "$VORTEX_LIB/configs/fail2ban/jail.local" "/etc/fail2ban/jail.local"
-        cp "$VORTEX_LIB/configs/fail2ban/filter.d/xray.conf" "/etc/fail2ban/filter.d/xray.conf"
+        if [ -d "$VORTEX_LIB/configs/fail2ban/filter.d" ]; then
+            cp -f "$VORTEX_LIB"/configs/fail2ban/filter.d/*.conf "/etc/fail2ban/filter.d/" 2>/dev/null || true
+        fi
 
         # Prefer firewalld banaction when available
         if command -v firewall-cmd &> /dev/null && [ -f "/etc/fail2ban/action.d/firewallcmd-ipset.conf" ]; then
@@ -211,6 +213,7 @@ setup_cron() {
     log_info "Setting up Cron Jobs for Monitoring..."
     CRON_FILE="/etc/cron.d/vortex-x"
     cat > "$CRON_FILE" <<EOF
+MAILTO=""
 * * * * * root python3 $VORTEX_LIB/monitoring/traffic_monitor.py
 * * * * * root python3 $VORTEX_LIB/user_management/ip_limiter.py
 */5 * * * * root python3 $VORTEX_LIB/monitoring/health_check.py --quiet
@@ -248,7 +251,9 @@ main() {
         if [ -d "/etc/fail2ban" ] && [ -d "$VORTEX_LIB/configs/fail2ban" ]; then
             log_info "Refreshing Fail2ban configs..."
             cp "$VORTEX_LIB/configs/fail2ban/jail.local" "/etc/fail2ban/jail.local" || true
-            cp "$VORTEX_LIB/configs/fail2ban/filter.d/xray.conf" "/etc/fail2ban/filter.d/xray.conf" || true
+            if [ -d "$VORTEX_LIB/configs/fail2ban/filter.d" ]; then
+                cp -f "$VORTEX_LIB"/configs/fail2ban/filter.d/*.conf "/etc/fail2ban/filter.d/" 2>/dev/null || true
+            fi
 
             # Prefer firewalld banaction when available
             if command -v firewall-cmd &> /dev/null && [ -f "/etc/fail2ban/action.d/firewallcmd-ipset.conf" ]; then

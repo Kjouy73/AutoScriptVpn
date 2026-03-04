@@ -8,6 +8,7 @@ class SSLManager:
         self.domain = domain
         self.cert_path = f"/etc/letsencrypt/live/{domain}/fullchain.pem"
         self.key_path = f"/etc/letsencrypt/live/{domain}/privkey.pem"
+        self.renewal_conf = f"/etc/letsencrypt/renewal/{domain}.conf"
 
     def _run(self, cmd):
         return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
@@ -25,6 +26,66 @@ class SSLManager:
         result = self._run(cmd)
         subprocess.run(["systemctl", "start", "nginx"], check=False)
         return result
+
+    def _ensure_webroot_renewal(self) -> None:
+        if not os.path.exists(self.renewal_conf):
+            return
+
+        try:
+            with open(self.renewal_conf, "r", encoding="utf-8") as handle:
+                lines = handle.read().splitlines(True)
+        except Exception:
+            return
+
+        in_params = False
+        saw_params = False
+        has_webroot_path = False
+        changed = False
+        out = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                in_params = stripped.lower() == "[renewalparams]"
+                if in_params:
+                    saw_params = True
+            if in_params and stripped.startswith("authenticator") and "standalone" in stripped:
+                out.append("authenticator = webroot\n")
+                changed = True
+                continue
+            if in_params and stripped.startswith("webroot_path"):
+                has_webroot_path = True
+            out.append(line)
+
+        if not saw_params:
+            out.append("\n[renewalparams]\n")
+            out.append("authenticator = webroot\n")
+            changed = True
+            in_params = True
+
+        # Ensure webroot_path exists when authenticator is webroot
+        text = "".join(out)
+        if "authenticator = webroot" in text and not has_webroot_path:
+            # Insert right after authenticator line inside [renewalparams]
+            new_out = []
+            in_params = False
+            inserted = False
+            for line in out:
+                stripped = line.strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    in_params = stripped.lower() == "[renewalparams]"
+                new_out.append(line)
+                if in_params and stripped.startswith("authenticator") and ("webroot" in stripped) and not inserted:
+                    new_out.append("webroot_path = /var/www/html\n")
+                    inserted = True
+                    changed = True
+            out = new_out
+
+        if changed:
+            try:
+                with open(self.renewal_conf, "w", encoding="utf-8") as handle:
+                    handle.write("".join(out))
+            except Exception:
+                return
 
     def issue_cert(self):
         print(f"[INFO] Issuing SSL Certificate for {self.domain}...")
@@ -76,6 +137,7 @@ class SSLManager:
                     raise RuntimeError("webroot_failed")
 
                 print("[SUCCESS] SSL Certificate issued successfully.")
+                self._ensure_webroot_renewal()
                 self.apply_permissions()
                 return True
             except Exception:
@@ -83,6 +145,7 @@ class SSLManager:
                 result = self._issue_cert_standalone()
                 if result.returncode == 0:
                     print("[SUCCESS] SSL Certificate issued successfully.")
+                    self._ensure_webroot_renewal()
                     self.apply_permissions()
                     return True
                 print(f"[ERROR] SSL Issuance failed: {result.stderr}")
@@ -99,6 +162,7 @@ class SSLManager:
         result = self._issue_cert_standalone()
         if result.returncode == 0:
             print("[SUCCESS] SSL Certificate issued successfully.")
+            self._ensure_webroot_renewal()
             self.apply_permissions()
             return True
         print(f"[ERROR] SSL Issuance failed: {result.stderr}")
@@ -106,6 +170,7 @@ class SSLManager:
 
     def renew_cert(self):
         print("[INFO] Renewing SSL Certificates...")
+        self._ensure_webroot_renewal()
         result = self._run(["certbot", "renew", "--quiet"])
         if result.returncode == 0:
             subprocess.run(["systemctl", "reload", "nginx"], check=False)
